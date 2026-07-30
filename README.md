@@ -43,11 +43,13 @@ Each session lands in `~/Recordings/<yyyy.MM.dd-HHmm>/`:
 | `transcript.md` | the same transcript rendered for reading |
 | `transcribe.log` | transcription progress/errors for this session |
 
-Two tracks on purpose: speech models do better on clean single-source audio,
-and mic-vs-system is free two-party diarization — `me` vs `them` with no
-speaker-identification model. CAF on purpose: unlike m4a, it needs no
-finalization pass — if the process dies mid-meeting, everything already
-written is still readable.
+Two tracks on purpose: speech models do better on clean single-source audio.
+The mic is labeled `me`; the system track is automatically diarized into
+anonymous, session-local `speaker-1`, `speaker-2`, … labels. This resolves
+multiple remote participants without trying to identify people or sending
+any audio off-device. CAF on purpose: unlike m4a, it needs no finalization
+pass — if the process dies mid-meeting, everything already written is still
+readable.
 
 ## Transcription
 
@@ -59,8 +61,16 @@ whether they're already cached so you're never downloading after an important
 meeting.
 
 Each track is transcribed separately, shifted by its start offset so both
-share one clock, and merged by timestamp. Jobs run in a serial queue — you can
-start a new recording while the last one transcribes. Unfinished jobs resume
+share one clock, and merged by timestamp. Before transcribing the mixed system
+track, quill runs FluidAudio's offline Core ML Community-1/VBx diarizer.
+Parakeet word timestamps are aligned one word at a time, so a transcript span
+that crosses a turn boundary is split rather than assigned wholesale. A word
+must substantially overlap one diarized range before it receives an anonymous
+`speaker-N` label; otherwise it remains the safe generic `them` label. The
+canonical JSON records the speaker source, time-alignment confidence, and an
+overlap flag. If diarization or its model download fails, transcription still
+completes with `them`. Jobs run in a serial queue — you can start a new
+recording while the last one transcribes. Unfinished jobs resume
 on next launch (the filesystem is the queue: a session with `meta.json` but no
 `transcript.json` is pending). Failures append to the session's
 `transcribe.log` and never block later jobs.
@@ -76,6 +86,7 @@ Optional, at `~/.config/quill/config.json`:
 {
   "recordings_dir": "~/Recordings",
   "transcription": { "enabled": true, "engine": "parakeet" },
+  "diarization": { "enabled": true, "minimum_confidence": 0.55 },
   "on_stop": "my-hook"
 }
 ```
@@ -83,6 +94,14 @@ Optional, at `~/.config/quill/config.json`:
 - `recordings_dir` — where sessions land. Resolution order: `--out` flag >
   config > `~/Recordings`.
 - `transcription.enabled` — set `false` to just record.
+- `diarization.enabled` — split the mixed system track into anonymous
+  `speaker-N` labels (default `true`). Set `false` to retain one `them` label
+  for the full system track. The diarization models are downloaded once on
+  their first use and run locally thereafter.
+- `diarization.minimum_confidence` — the minimum 0–1 fraction of an ASR
+  word/span that must overlap a diarization range before Quill labels it
+  `speaker-N` (default `0.55`). Lower values label more speech but raise the
+  risk of a wrong attribution; unmatched/low-confidence speech remains `them`.
 - `mic_voice_processing` — Apple's echo cancellation on the mic (default off).
   Set `true` when recording meetings through the speakers, so playback doesn't
   bleed into the mic track and get transcribed twice as "me". The trade: while
@@ -112,7 +131,40 @@ quill install --uninstall
 - **AVAudioEngine** — mic capture
 - **AVAudioFile** — streaming AAC encode into CAF
 - **FluidAudio / Parakeet** — on-device Core ML transcription
+- **FluidAudio / Community-1 + VBx** — on-device, offline speaker diarization
 - **NSStatusItem** — the whole UI
+
+## Diarization acceptance tests
+
+The repository includes 12 short, pinned WAV/RTTM fixtures from the
+[DimQ1 Sortformer Diarization Test Set](https://huggingface.co/datasets/DimQ1/sortformer-diarization-test-set)
+(CC-BY-4.0). They cover two- and three-speaker turns with known annotations;
+see the fixture [attribution notice](Tests/quillTests/Fixtures/diarization/NOTICE.md).
+They are a short, non-overlapping read-speech smoke corpus—not a substitute
+for consented meeting-style regression fixtures.
+
+- **Any Swift platform (including Linux):** `swift test` runs the
+  Foundation-only RTTM parser and DER scorer. It verifies all 12 known
+  fixtures, expected speaker counts, anonymous-label matching, the error
+  accounting, and the 250 ms speaker-change collar.
+- **macOS:** opt into Quill's **actual** offline Core ML diarizer benchmark
+  only on a provisioned runner with its model cache preloaded:
+  ```sh
+  QUILL_RUN_DIARIZATION_BENCHMARK=1 swift test
+  ```
+  It requires each clip’s DER to be at most 35% and its detected speaker count
+  to be within one of the annotation. The test deliberately does not download
+  models, so a missing cache produces an actionable failure rather than making
+  normal test runs network-dependent. GitHub Actions runs the deterministic
+  portable suite on Ubuntu and the normal macOS build/test suite on `macos-15`.
+  Run the opt-in Core ML benchmark only from a separately provisioned macOS
+  runner that has the FluidAudio model cache.
+
+Cluster IDs are intentionally anonymous, so both suites use optimal
+cluster-to-reference matching over the same collar-defined scoring region
+before calculating DER. See [evaluation guidance](docs/diarization-evaluation.md)
+for the required consent, meeting-style corpus design, and a release benchmark
+checklist.
 
 ## Gotchas
 
