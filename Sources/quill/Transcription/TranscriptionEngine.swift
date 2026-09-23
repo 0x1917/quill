@@ -6,6 +6,16 @@ struct TranscriptSegment: Sendable {
     let start: TimeInterval
     let end: TimeInterval
     let text: String
+    /// Present when the ASR engine exposes word timing. Diarization can then
+    /// split a sentence at a speaker handoff instead of assigning it wholesale.
+    let words: [TimedTranscriptWord]
+
+    init(start: TimeInterval, end: TimeInterval, text: String, words: [TimedTranscriptWord] = []) {
+        self.start = start
+        self.end = end
+        self.text = text
+        self.words = words
+    }
 }
 
 /// A speech-to-text engine quill can run locally. Engines are prepared lazily

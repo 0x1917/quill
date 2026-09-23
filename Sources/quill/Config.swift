@@ -5,6 +5,7 @@ import Foundation
 ///     {
 ///       "recordings_dir": "~/Recordings",
 ///       "transcription": { "enabled": true, "engine": "parakeet" },
+///       "diarization": { "enabled": true, "minimum_confidence": 0.55 },
 ///       "mic_voice_processing": true,
 ///       "on_stop": "my-hook"
 ///     }
@@ -44,8 +45,27 @@ enum Config {
         transcription()?["engine"] as? String ?? "parakeet"
     }
 
+    /// Whether the mixed system-audio track is split into anonymous speakers.
+    /// Default on; set `diarization.enabled` to false to retain one "them"
+    /// speaker for that entire track.
+    static func diarizationEnabled() -> Bool {
+        diarization()?["enabled"] as? Bool ?? true
+    }
+
+    /// Minimum fraction of a word/span that must overlap one diarized range
+    /// before Quill emits an anonymous `speaker-N` label. Out-of-range values
+    /// are ignored in favour of the conservative default.
+    static func diarizationMinimumConfidence() -> Double {
+        let value = diarization()?["minimum_confidence"] as? Double ?? 0.55
+        return (0...1).contains(value) ? value : 0.55
+    }
+
     private static func transcription() -> [String: Any]? {
         load()?["transcription"] as? [String: Any]
+    }
+
+    private static func diarization() -> [String: Any]? {
+        load()?["diarization"] as? [String: Any]
     }
 
     /// Apple voice processing (acoustic echo cancellation) on the mic, so

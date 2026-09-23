@@ -1,4 +1,5 @@
 import Foundation
+import quillDiarizationSupport
 
 /// Post-recording pipeline: a serial queue of session folders to transcribe.
 /// mic.caf → "me", system.caf → "them"; each track's segments are shifted by
@@ -17,6 +18,7 @@ actor TranscriptionCoordinator {
     private var queue: [URL] = []
     private var draining = false
     private var engine: TranscriptionEngine?
+    private var diarizer: DiarizationEngine?
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
 
@@ -90,6 +92,8 @@ actor TranscriptionCoordinator {
         }
         await engine?.release()
         engine = nil
+        await diarizer?.release()
+        diarizer = nil
         publish(lastFailure.map { .failed(session: $0) } ?? .idle)
         draining = false
         // An enqueue that landed between the loop exiting and the release
@@ -102,12 +106,34 @@ actor TranscriptionCoordinator {
         let engine = try await preparedEngine()
 
         var merged: [Transcript.Segment] = []
+        var diarizationEngine: String?
         for track in meta.tracks {
             let audio = dir.appendingPathComponent(track.file)
             guard FileManager.default.fileExists(atPath: audio.path) else {
                 log(dir, "skipping missing track \(track.file)")
                 continue
             }
+
+            // The mic is already its own speaker. System audio is usually a
+            // mixed remote track, so attribute each ASR segment to the
+            // anonymous diarization cluster with the largest time overlap.
+            var speakerTimeline: [DiarizedSpeakerRange] = []
+            if track.speaker == "them", Config.diarizationEnabled() {
+                do {
+                    let diarizer = try await preparedDiarizer()
+                    log(dir, "diarizing \(track.file) (\(diarizer.name))")
+                    speakerTimeline = try await diarizer.diarize(audio).map {
+                        DiarizedSpeakerRange(speaker: $0.speaker, start: $0.start, end: $0.end)
+                    }
+                    diarizationEngine = diarizer.name
+                    log(dir, "diarized \(track.file) — \(speakerTimeline.count) ranges")
+                } catch {
+                    // A diarization failure must not cost the transcript. The
+                    // original track-level "them" label remains the fallback.
+                    log(dir, "diarization skipped for \(track.file): \(error)")
+                }
+            }
+
             log(dir, "transcribing \(track.file) (\(engine.name))")
             // One bad track (empty, truncated) shouldn't cost us the other's
             // transcript — log it and keep going.
@@ -119,13 +145,22 @@ actor TranscriptionCoordinator {
                 continue
             }
             let offset = TimeInterval(track.offsetMs) / 1000
-            merged += segments.map {
-                Transcript.Segment(
-                    speaker: track.speaker,
-                    start_ms: Int(($0.start + offset) * 1000),
-                    end_ms: Int(($0.end + offset) * 1000),
-                    text: $0.text
+            for segment in segments {
+                let turns = Self.attributedTurns(
+                    for: segment, defaultSpeaker: track.speaker, timeline: speakerTimeline,
+                    isMicrophone: track.speaker == "me"
                 )
+                merged += turns.map {
+                    Transcript.Segment(
+                        speaker: $0.attribution.speaker,
+                        speaker_source: $0.attribution.source.rawValue,
+                        speaker_confidence: $0.attribution.confidence,
+                        overlap: $0.attribution.overlap,
+                        start_ms: Int(($0.start + offset) * 1000),
+                        end_ms: Int(($0.end + offset) * 1000),
+                        text: $0.text
+                    )
+                }
             }
         }
         merged.sort { $0.start_ms < $1.start_ms }
@@ -133,6 +168,7 @@ actor TranscriptionCoordinator {
         let transcript = Transcript(
             engine: engine.name,
             model: engine.model,
+            diarization_engine: diarizationEngine,
             created_at: ISO8601DateFormatter().string(from: Date()),
             segments: merged
         )
@@ -152,6 +188,43 @@ actor TranscriptionCoordinator {
         try await engine.prepare()
         self.engine = engine
         return engine
+    }
+
+    private func preparedDiarizer() async throws -> DiarizationEngine {
+        if let diarizer { return diarizer }
+        let diarizer = DiarizationEngine()
+        try await diarizer.prepare()
+        self.diarizer = diarizer
+        return diarizer
+    }
+
+    private static func attributedTurns(
+        for asr: TranscriptSegment,
+        defaultSpeaker: String,
+        timeline: [DiarizedSpeakerRange],
+        isMicrophone: Bool
+    ) -> [AttributedTranscriptTurn] {
+        if isMicrophone {
+            return [AttributedTranscriptTurn(
+                text: asr.text, start: asr.start, end: asr.end,
+                attribution: SpeakerAttribution(
+                    speaker: defaultSpeaker, source: .microphone, confidence: 1, overlap: false
+                )
+            )]
+        }
+        if !asr.words.isEmpty {
+            return DiarizationAttributor.turns(
+                words: asr.words, defaultSpeaker: defaultSpeaker, ranges: timeline,
+                minimumConfidence: Config.diarizationMinimumConfidence()
+            )
+        }
+        let attribution = DiarizationAttributor.attribution(
+            start: asr.start, end: asr.end, defaultSpeaker: defaultSpeaker, ranges: timeline,
+            minimumConfidence: Config.diarizationMinimumConfidence()
+        )
+        return [AttributedTranscriptTurn(
+            text: asr.text, start: asr.start, end: asr.end, attribution: attribution
+        )]
     }
 
     /// Fires the configured on_stop shell command with the session directory
@@ -234,6 +307,9 @@ private struct SessionMeta {
 private struct Transcript: Codable {
     struct Segment: Codable {
         let speaker: String
+        let speaker_source: String
+        let speaker_confidence: Double
+        let overlap: Bool
         let start_ms: Int
         let end_ms: Int
         let text: String
@@ -241,6 +317,7 @@ private struct Transcript: Codable {
 
     let engine: String
     let model: String
+    let diarization_engine: String?
     let created_at: String
     let segments: [Segment]
 
@@ -257,9 +334,16 @@ private struct Transcript: Codable {
     }
 
     private func rendered(title: String) -> String {
-        var lines = ["# \(title)", "", "engine: \(engine) (\(model))", ""]
+        var lines = ["# \(title)", "", "engine: \(engine) (\(model))"]
+        if let diarization_engine {
+            lines.append("diarization: \(diarization_engine)")
+        }
+        lines.append("")
         for seg in segments {
-            lines.append("**[\(Self.clock(seg.start_ms))] \(seg.speaker):** \(seg.text)")
+            let confidence = seg.speaker_source == "diarization"
+                ? " · \(Int((seg.speaker_confidence * 100).rounded()))% aligned" : ""
+            let overlap = seg.overlap ? " · overlap" : ""
+            lines.append("**[\(Self.clock(seg.start_ms))] \(seg.speaker)\(confidence)\(overlap):** \(seg.text)")
             lines.append("")
         }
         return lines.joined(separator: "\n")

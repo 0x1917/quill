@@ -21,6 +21,7 @@ enum DoctorReport {
             checkSystemAudio(),
             checkRecordingsRoot(recordingsRoot),
             checkTranscription(),
+            checkDiarization(),
         ]
     }
 
@@ -94,6 +95,21 @@ enum DoctorReport {
             name: "transcription",
             status: .warn("parakeet models not downloaded (~600 MB)"),
             remediation: "downloads automatically on first transcription — record a short test session while online"
+        )
+    }
+
+    /// Report model readiness without loading or downloading the diarizer.
+    static func checkDiarization() -> Check {
+        guard Config.transcriptionEnabled(), Config.diarizationEnabled() else {
+            return Check(name: "diarization", status: .warn("disabled in config"), remediation: nil)
+        }
+        if DiarizationEngine.modelsAvailable() {
+            return Check(name: "diarization", status: .ok, remediation: nil)
+        }
+        return Check(
+            name: "diarization",
+            status: .warn("offline models not downloaded"),
+            remediation: "record a short test session while online to prime the local Core ML cache"
         )
     }
 

@@ -1,0 +1,38 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  portable-diarization-tests:
+    name: Portable RTTM / DER tests (Ubuntu)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Quill itself is macOS-only, but its fixture integrity, RTTM parser,
+      # and DER-scoring suite is deliberately Foundation-only and runs here.
+      - name: Run portable Swift tests in a pinned Linux toolchain
+        run: |
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/src" \
+            --workdir /src \
+            swift:6.0 \
+            swift test
+
+  macos-build-and-tests:
+    name: macOS build and tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Swift toolchain
+        run: swift --version
+      # The Core ML quality benchmark is intentionally opt-in: it requires a
+      # pre-provisioned FluidAudio model cache. This command still builds the
+      # macOS app and runs all deterministic portable tests.
+      - name: Build Quill and run deterministic tests
+        run: swift test
