@@ -1,4 +1,4 @@
-import FluidAudio
+@preconcurrency import FluidAudio
 import Foundation
 
 /// Offline, on-device speaker diarization for the mixed system-audio track.
