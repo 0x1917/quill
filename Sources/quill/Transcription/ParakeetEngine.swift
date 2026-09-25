@@ -1,6 +1,7 @@
 import AVFoundation
 import FluidAudio
 import Foundation
+import quillDiarizationSupport
 
 /// Parakeet TDT 0.6B v2 (English) via FluidAudio's Core ML port. Models
 /// download once into FluidAudio's managed cache (~600 MB); after that,
