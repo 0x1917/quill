@@ -1,4 +1,5 @@
 import Foundation
+import quillDiarizationSupport
 
 /// One timed span of recognized speech from a single track, relative to that
 /// track's own start.
